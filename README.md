@@ -71,6 +71,8 @@ Agents don't talk to each other. They communicate through files on disk.
 
 ```
 .claude/bus/<flow>/
+    ├── log.md                    ← Universal timeline (append-only, all cycles)
+    ├── state.md                  ← Current orchestrator state (survives compaction)
     ├── audit/cycle-NNN.md        ← Discovery agent writes findings
     ├── analysis/
     │   ├── affected-files.md     ← Analyst writes file list
@@ -89,7 +91,8 @@ With the bus, the orchestrator says "write your output to `bus/audit/cycle-001.m
 
 This also gives you:
 - **Persistence** — Results survive across sessions. Resume tomorrow where you left off.
-- **Auditability** — Every intermediate result is inspectable on disk.
+- **Compaction resilience** — The orchestrator writes its current state (`state.md`) before every stage transition. If context compacts mid-cycle, the orchestrator reads state.md on startup and resumes from the recorded stage. The universal log (`log.md`) provides the full timeline across all cycles — the first thing read when resuming.
+- **Auditability** — Every intermediate result is inspectable on disk. The universal log gives a one-line-per-stage overview; the detailed bus files have the full content.
 - **Decoupling** — Any agent can be replaced, retried, or run independently. They depend on files existing, not on who wrote them.
 
 ### 3. Agent Isolation
@@ -218,6 +221,8 @@ The generated orchestrator skills accept a mode argument at runtime that control
 
 The orchestrator dispatches agents, confirms bus files exist, and presents decisions to the user. No validation between stages. Minimal token cost. Good for fast iteration when you trust agents to produce complete outputs and just need coordination.
 
+Router still performs a **lightweight evaluation** on cycle 2+: it compares finding counts between the previous and current discovery audits. If findings decreased, it reports progress. If findings are unchanged or increased, it warns the user and suggests switching to supervisor mode. This isn't authoritative (no blind audit = no regression detection), but it prevents completely blind looping.
+
 ```
 /feature-flow router
 ```
@@ -235,7 +240,7 @@ Same dispatch pattern, plus the orchestrator reads and validates every bus file 
 
 The supervisor catches information loss at every handoff. Agents silently drop details at every boundary — the analyst misses a file the auditor mentioned, the planner drops two files the analyst identified, the coder skips a plan item. Without the supervisor, these losses compound silently. With it, they're caught and corrected before they propagate.
 
-Supervisor mode also runs the full blind audit protocol (described above) — router mode skips it and just logs + loops.
+Supervisor mode also runs the full blind audit protocol (described above). Router mode uses lightweight finding-count comparison instead.
 
 ```
 /feature-flow supervisor
@@ -306,9 +311,9 @@ The `flow-creator` skill is what brings this architecture to life for a specific
 │   ├── feature-flow/SKILL.md     ← Orchestrator: dispatches feature-* agents
 │   └── security-flow/SKILL.md    ← Orchestrator: dispatches security-* agents
 └── bus/
-    ├── bugfix/{audit,analysis,plan,history,evaluation,supervisor}/
-    ├── feature/{audit,analysis,plan,history,evaluation,supervisor}/
-    └── security/{audit,analysis,plan,history,evaluation,supervisor}/
+    ├── bugfix/{audit,analysis,plan,history,evaluation,supervisor}/ + log.md, state.md
+    ├── feature/{audit,analysis,plan,history,evaluation,supervisor}/ + log.md, state.md
+    └── security/{audit,analysis,plan,history,evaluation,supervisor}/ + log.md, state.md
 ```
 
 ### Why Generate Instead of Use Directly?

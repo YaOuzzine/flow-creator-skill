@@ -93,6 +93,10 @@ The orchestrator MUST:
 mkdir -p .claude/bus/<flow>/{audit,analysis,plan,history,evaluation,supervisor}
 ```
 
+Also create empty starter files:
+- `bus/<flow>/log.md` — universal timeline (append-only, one line per stage completion across all cycles)
+- `bus/<flow>/state.md` — current orchestrator state (survives context compaction, enables resumption)
+
 ---
 
 ## Step 4: Verify and Report
@@ -103,7 +107,7 @@ After generating all files:
 2. Show the dependency layer order baked into agents
 3. Show the verification commands baked in
 4. Tell the user how to invoke each flow:
-   - `/<flow>-flow router` — lightweight mode (dispatch agents, minimal validation)
+   - `/<flow>-flow router` — lightweight mode (dispatch agents, lightweight evaluation via finding count comparison)
    - `/<flow>-flow supervisor` — thorough mode (validated handoffs, blind re-audits, regression detection)
    - `/<flow>-flow router <description>` — skip audit, implement directly
    - The router/supervisor choice is made at runtime, not at generation time
@@ -154,4 +158,6 @@ These are baked into every generated flow:
 
 **Dependency-aware execution** — Coding phases respect the project's layer DAG. Upstream first, downstream last. Independent layers can parallelize.
 
-**Cycle convergence** — Each cycle changes the codebase. Next audit discovers different (fewer) issues. System converges toward zero findings — or halts if it detects stagnation (STALE), regression (REGRESSION), or spiral (DIVERGING).
+**Compaction resilience** — The orchestrator writes its state to `bus/<flow>/state.md` before every stage transition. If context compacts mid-cycle, the orchestrator reads state.md on startup and resumes from where it left off. The universal log (`bus/<flow>/log.md`) provides a full timeline across all cycles — the first thing to read when resuming.
+
+**Cycle convergence** — Each cycle changes the codebase. Next audit discovers different (fewer) issues. System converges toward zero findings — or halts if it detects stagnation (STALE), regression (REGRESSION), or spiral (DIVERGING). Both modes track convergence — supervisor via blind audit verdicts, router via finding count comparison.

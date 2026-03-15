@@ -17,6 +17,20 @@ Arguments: $ARGUMENTS
 
 ---
 
+## Startup — Recovery Check
+
+**Always do this first, before parsing arguments.**
+
+1. Check if `bus/<flow>/state.md` exists.
+2. If it exists, read it. If it shows an incomplete cycle (stage is not EVALUATE with a DECISION logged), you are resuming a compacted session.
+3. Read `bus/<flow>/log.md` to understand the full history of this flow.
+4. Resume from the stage recorded in `state.md`. Read the relevant bus files for that stage to reconstruct context. Do NOT restart the cycle.
+5. If `state.md` does not exist, this is a fresh start — proceed normally.
+
+This recovery mechanism ensures the flow survives context compaction. The orchestrator's in-memory state is ephemeral, but the bus is permanent. When in doubt, trust the bus.
+
+---
+
 ## Mode
 
 Parse from `$ARGUMENTS`:
@@ -48,9 +62,45 @@ mkdir -p .claude/bus/<flow>/{audit,analysis,plan,history,evaluation,supervisor}
 
 Cycle number: count existing files in `bus/<flow>/audit/`. If none, start at 001.
 
+### State File — `bus/<flow>/state.md`
+
+**Before every stage transition**, write the current state to `bus/<flow>/state.md`:
+
+```
+cycle: NNN
+stage: DISCOVER | ANALYZE | PLAN | EXECUTE | VERIFY | EVALUATE
+mode: router | supervisor
+target: "<user's selected task or description>"
+started: <ISO timestamp>
+last_update: <ISO timestamp>
+```
+
+This file survives context compaction. **On startup, always read `bus/<flow>/state.md` first.** If it exists and shows an incomplete cycle, resume from the recorded stage — do not restart the cycle. Read the bus files for that stage to reconstruct context.
+
+### Universal Log — `bus/<flow>/log.md`
+
+An append-only timeline across all cycles. **Every stage completion appends one line.** This is the first thing to read when resuming a session — it tells you where the flow has been and where it is now.
+
+Format — append each entry, never overwrite:
+```
+## Cycle NNN
+
+- [<timestamp>] DISCOVER — <count> findings written to audit/cycle-NNN.md
+- [<timestamp>] ANALYZE — <count> files affected, link tree in analysis/link-tree.md
+- [<timestamp>] PLAN — <count> items, <count> phases
+- [<timestamp>] EXECUTE — <count> files modified → history/cycle-NNN.md
+- [<timestamp>] VERIFY — <PASS|FAIL (attempt N)>
+- [<timestamp>] EVALUATE — verdict: <POSITIVE|STALE|REGRESSION|DIVERGING>, findings: <prev_count> → <curr_count>
+- [<timestamp>] DECISION — <CONTINUE|HALT|RETRY> — "<reason>"
+```
+
+Create the file on first cycle. Append to it on every subsequent cycle. Each cycle gets its own `## Cycle NNN` header.
+
 ---
 
 ## STAGE 0: DISCOVER
+
+Update `bus/<flow>/state.md`: `stage: DISCOVER`.
 
 Dispatch **<flow>-discovery** agent. Tell it the cycle number and output path.
 
@@ -74,6 +124,8 @@ Pick a number, multiple numbers (e.g. "1,3"), or describe your own task:
 
 ## STAGE 1: ANALYZE
 
+Update `bus/<flow>/state.md`: `stage: ANALYZE`, `target: "<selected task>"`.
+
 Dispatch **<flow>-analyst** agent. Tell it the task and audit file path.
 
 **Router:** Confirm both `analysis/affected-files.md` and `analysis/link-tree.md` exist.
@@ -83,6 +135,8 @@ Dispatch **<flow>-analyst** agent. Tell it the task and audit file path.
 ---
 
 ## STAGE 2: PLAN
+
+Update `bus/<flow>/state.md`: `stage: PLAN`.
 
 Dispatch **<flow>-planner** agent. Tell it the task, point to analysis bus files.
 
@@ -94,6 +148,8 @@ Dispatch **<flow>-planner** agent. Tell it the task, point to analysis bus files
 
 ## STAGE 3: EXECUTE
 
+Update `bus/<flow>/state.md`: `stage: EXECUTE`.
+
 Read `plan/current-plan.md` and `analysis/link-tree.md`. Dispatch **<flow>-coder** agents in phases by dependency order. Independent phases can parallelize. Dependent phases are sequential.
 
 **Supervisor:** After coding, run `git diff --name-only`. Compare against plan. Flag missing items and unplanned changes. Log checkpoint.
@@ -102,6 +158,8 @@ Read `plan/current-plan.md` and `analysis/link-tree.md`. Dispatch **<flow>-coder
 
 ## STAGE 4: VERIFY
 
+Update `bus/<flow>/state.md`: `stage: VERIFY`.
+
 Run project verification commands:
 <VERIFY_COMMANDS>
 
@@ -109,8 +167,9 @@ If any fail: dispatch **<flow>-coder** to fix, re-verify. Max 3 attempts, then h
 
 ---
 
-## STAGE 5: LOG + LOOP (Router)
+## STAGE 5: LOG + EVALUATE + LOOP (Router)
 
+### 5.1 — Log
 Write history to `bus/<flow>/history/cycle-NNN.md`:
 ```
 # Cycle NNN — <date>
@@ -122,14 +181,30 @@ Write history to `bus/<flow>/history/cycle-NNN.md`:
 - <command>: PASS/FAIL
 ```
 
-Summarize to user. Ask: continue / specific task / done.
+Append to `bus/<flow>/log.md`.
+
+### 5.2 — Lightweight Evaluation (no blind audit)
+
+Router skips the blind re-audit but still checks for progress. If this is cycle 2+:
+
+1. Read previous audit: `bus/<flow>/audit/cycle-(N-1).md` — count findings
+2. Read current audit: `bus/<flow>/audit/cycle-N.md` — count findings (this is the discovery audit from stage 0 of the CURRENT cycle, not a re-audit)
+3. Compare:
+   - **Findings decreased** → POSITIVE — report delta, continue with confidence
+   - **Findings unchanged** → STALE — warn user: "Same number of findings as last cycle. Consider switching to supervisor mode for deeper evaluation."
+   - **Findings increased** → DIVERGING — warn user: "Finding count went up (<prev> → <curr>). Consider switching to supervisor mode."
+
+Router never halts automatically — it always presents the verdict and asks the user what to do. The lightweight eval is informational, not authoritative (no blind audit means no regression detection).
+
+### 5.3 — Loop
+Update `bus/<flow>/state.md`. Summarize to user with the lightweight eval verdict. Ask: continue / specific task / switch to supervisor / done.
 
 ---
 
 ## STAGE 5: LOG + BLIND RE-AUDIT (Supervisor)
 
 ### 5.1 — Log
-Write history (same format as router).
+Write history (same format as router). Append to `bus/<flow>/log.md`.
 
 ### 5.2 — Blind Audit
 Dispatch **<flow>-auditor** agent. Tell it cycle number and output path. **Do NOT leak what was changed.**
@@ -154,7 +229,7 @@ Read `bus/<flow>/evaluation/latest.md`:
 
 **DIVERGING** → HALT. "Finding count increasing: [trend]. Each cycle creates more problems."
 
-Log decision to `bus/<flow>/supervisor/cycle-NNN.md`.
+Log decision to `bus/<flow>/supervisor/cycle-NNN.md`. Append verdict to `bus/<flow>/log.md`. Update `bus/<flow>/state.md`.
 
 ---
 
